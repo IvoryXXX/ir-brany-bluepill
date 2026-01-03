@@ -1,4 +1,15 @@
 #include "Buzzer.h"
+#if defined(ARDUINO_ARCH_STM32)
+#include <HardwareTimer.h>
+#endif
+
+Buzzer* Buzzer::s_inst = nullptr;
+
+static inline uint32_t clampU32(uint32_t v, uint32_t lo, uint32_t hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
 
 void Buzzer::begin(uint8_t pinA, uint8_t pinB) {
   _a = pinA;
@@ -12,16 +23,10 @@ void Buzzer::begin(uint8_t pinA, uint8_t pinB) {
   _mode = MODE_SILENT;
 
   _runLevel = 0;
-  _effLevel = 0;
-
-  _newPending = false;
+  _runNextMs = 0;
+  _runOn = false;
+  _runAlt = false;
   _newUntilMs = 0;
-
-  _l2On = false;
-  _l2NextMs = 0;
-
-  _l3Phase = false;
-  _l3NextMs = 0;
 
   _diagPct = 0;
   _diagOn = false;
@@ -29,47 +34,41 @@ void Buzzer::begin(uint8_t pinA, uint8_t pinB) {
 
   _freq = 0;
   _out = false;
-  _nextToggleUs = micros();
+  _softNextUs = micros();
+
+  s_inst = this;
+
+#if defined(ARDUINO_ARCH_STM32)
+  // BluePill: TIM4 je obvykle safe volba.
+  _tmr = new HardwareTimer(TIM4);
+  _tmr->pause();
+  _tmr->attachInterrupt(Buzzer::isrThunk);
+#endif
 }
 
 void Buzzer::setMode(Mode m) {
   if (_mode == m) return;
   _mode = m;
 
-  // reset patterns to avoid “ghost beeps”
-  _newPending = false;
-  _newUntilMs = 0;
+  _runNextMs = 0;
+  _runOn = false;
+  _runAlt = false;
 
-  _l2On = false;
-  _l2NextMs = 0;
-
-  _l3Phase = false;
-  _l3NextMs = 0;
-
-  _diagOn = false;
   _diagNextMs = 0;
+  _diagOn = false;
 
-  noToneDiff();
+  if (_mode == MODE_SILENT) noToneOut();
 }
 
 void Buzzer::stopAll() {
-  _newPending = false;
+  _runLevel = 0;
   _newUntilMs = 0;
 
-  _runLevel = 0;
-  _effLevel = 0;
-
   _diagPct = 0;
-  _diagOn = false;
   _diagNextMs = 0;
+  _diagOn = false;
 
-  _l2On = false;
-  _l2NextMs = 0;
-
-  _l3Phase = false;
-  _l3NextMs = 0;
-
-  noToneDiff();
+  noToneOut();
 }
 
 void Buzzer::setRunLevel(uint8_t level) {
@@ -78,9 +77,7 @@ void Buzzer::setRunLevel(uint8_t level) {
 }
 
 void Buzzer::triggerNewEvent() {
-  if (_mode != MODE_RUN) return;
-  if (_effLevel >= 3) return; // L3 has priority
-  _newPending = true;
+  _newUntilMs = millis() + 70;
 }
 
 void Buzzer::setDiagQualityPct(uint8_t pct) {
@@ -88,139 +85,153 @@ void Buzzer::setDiagQualityPct(uint8_t pct) {
   _diagPct = pct;
 }
 
-// ---------------- differential square wave ----------------
-
-void Buzzer::toneDiff(uint16_t freq) {
-  _freq = freq;
-  if (_freq == 0) {
-    noToneDiff();
-    return;
-  }
-  _out = false;
-  _nextToggleUs = micros();
-}
-
-void Buzzer::noToneDiff() {
-  _freq = 0;
-  digitalWrite(_a, LOW);
-  digitalWrite(_b, LOW);
-}
-
-void Buzzer::serviceToneGen() {
-  if (_freq == 0) return;
-
-  const uint32_t nowUs = micros();
-  if ((int32_t)(nowUs - _nextToggleUs) >= 0) {
-    _out = !_out;
-
-    // differential drive
-    digitalWrite(_a, _out ? HIGH : LOW);
-    digitalWrite(_b, _out ? LOW  : HIGH);
-
-    // half-period in microseconds
-    const uint32_t halfPeriodUs = 500000UL / (uint32_t)_freq;
-    _nextToggleUs = nowUs + halfPeriodUs;
-  }
-}
-
-// ------------------------------------------------------------
-
 void Buzzer::update() {
   const uint32_t nowMs = millis();
 
   if (_mode == MODE_SILENT) {
-    noToneDiff();
-    return;
+    noToneOut();
+  } else if (_mode == MODE_RUN) {
+    updateRun(nowMs);
+  } else {
+    updateDiag(nowMs);
   }
 
-  if (_mode == MODE_RUN) updateRun(nowMs);
-  else updateDiag(nowMs);
-
-  serviceToneGen();
+#if !defined(ARDUINO_ARCH_STM32)
+  softService();
+#endif
 }
 
+// ---------------- output control ----------------
+
+void Buzzer::toneOut(uint16_t freq) {
+  if (freq == 0) { noToneOut(); return; }
+  if (_freq == freq) return;
+
+  _freq = freq;
+
+#if defined(ARDUINO_ARCH_STM32)
+  timerSetFreq(freq);
+#else
+  _softNextUs = micros();
+#endif
+}
+
+void Buzzer::noToneOut() {
+  _freq = 0;
+#if defined(ARDUINO_ARCH_STM32)
+  timerStop();
+#endif
+  _out = false;
+  digitalWrite(_a, LOW);
+  digitalWrite(_b, LOW);
+}
+
+// ---------------- RUN patterns ----------------
+
 void Buzzer::updateRun(uint32_t nowMs) {
-  _effLevel = _runLevel;
+  if (_runLevel == 0) { noToneOut(); return; }
 
-  // NEW beep has priority unless L3
-  if (_newPending && _effLevel < 3) {
-    _newPending = false;
-    _newUntilMs = nowMs + 120;
-    toneDiff(BUZ_FREQ_NEW);
-    return;
-  }
+  const bool newChirp = (_newUntilMs != 0) && ((int32_t)(nowMs - _newUntilMs) < 0);
+  if (newChirp) { toneOut(BUZ_FREQ_NEW); return; }
 
-  if (_newUntilMs != 0) {
-    if ((int32_t)(nowMs - _newUntilMs) < 0) return; // still playing NEW
-    _newUntilMs = 0;
-  }
+  if (_runLevel == 1) { toneOut(BUZ_FREQ_L1); return; }
 
-  if (_effLevel == 0) {
-    noToneDiff();
-    return;
-  }
-
-  if (_effLevel == 1) {
-    toneDiff(BUZ_FREQ_L1);
-    return;
-  }
-
-  if (_effLevel == 2) {
-    // L2: 90ms on / 90ms off
-    if (_l2NextMs == 0 || (int32_t)(nowMs - _l2NextMs) >= 0) {
-      _l2On = !_l2On;
-      if (_l2On) {
-        toneDiff(BUZ_FREQ_L2);
-        _l2NextMs = nowMs + 90;
-      } else {
-        noToneDiff();
-        _l2NextMs = nowMs + 90;
-      }
+  if (_runLevel == 2) {
+    if (_runNextMs == 0 || (int32_t)(nowMs - _runNextMs) >= 0) {
+      _runOn = !_runOn;
+      if (_runOn) { toneOut(BUZ_FREQ_L2); _runNextMs = nowMs + 120; }
+      else        { noToneOut();          _runNextMs = nowMs + 80;  }
     }
     return;
   }
 
-  // L3: alternating A/B
-  if (_l3NextMs == 0 || (int32_t)(nowMs - _l3NextMs) >= 0) {
-    _l3Phase = !_l3Phase;
-    toneDiff(_l3Phase ? BUZ_FREQ_L3_A : BUZ_FREQ_L3_B);
-    _l3NextMs = nowMs + 220;
+  if (_runNextMs == 0 || (int32_t)(nowMs - _runNextMs) >= 0) {
+    _runAlt = !_runAlt;
+    toneOut(_runAlt ? BUZ_FREQ_L3_A : BUZ_FREQ_L3_B);
+    _runNextMs = nowMs + 150;
   }
 }
 
+// ---------------- DIAG pattern ----------------
+
 void Buzzer::updateDiag(uint32_t nowMs) {
-  const uint8_t pct = _diagPct;
+  const uint8_t fullAtPct = 85;
+  const uint16_t slowMs = 900;
+  const uint16_t fastMs = 140;
 
-  if (pct < 10) {
-    noToneDiff();
-    _diagOn = false;
+  if (_diagPct >= fullAtPct) {
+    toneOut(BUZ_FREQ_L2);
     _diagNextMs = 0;
-    return;
-  }
-
-  if (pct >= 85) {
-    // continuous (reuse L2 freq; config.h has no dedicated DIAG freq)
-    toneDiff(BUZ_FREQ_L2);
     _diagOn = true;
     return;
   }
 
-  // 10..84%: beep speed increases with pct
-  const uint16_t minPeriod = 800;
-  const uint16_t maxPeriod = 120;
-  const uint8_t spanPct = 74; // 84-10
+  uint8_t p = _diagPct;
+  if (p < 5) p = 5;
 
-  const uint16_t period =
-      (uint16_t)(minPeriod - (uint32_t)(minPeriod - maxPeriod) * (uint32_t)(pct - 10) / spanPct);
+  const uint32_t period = slowMs - (uint32_t)(slowMs - fastMs) * (uint32_t)p / 85U;
+  const uint32_t per = clampU32(period, fastMs, slowMs);
 
   if (_diagNextMs == 0 || (int32_t)(nowMs - _diagNextMs) >= 0) {
     _diagOn = !_diagOn;
-    if (_diagOn) {
-      toneDiff(BUZ_FREQ_L2);
-      _diagNextMs = nowMs + (period / 3);
-    } else {
-      noToneDiff();
-      _diagNextMs = nowMs + ((period * 2) / 3);
-    }
+    if (_diagOn) { toneOut(BUZ_FREQ_L2); _diagNextMs = nowMs + per/3; }
+    else         { noToneOut();          _diagNextMs = nowMs + (per*2)/3; }
   }
+}
+
+// ---------------- Timer (STM32) ----------------
+
+void Buzzer::isrThunk() {
+  if (s_inst) s_inst->isrTick();
+}
+
+void Buzzer::isrTick() {
+  _out = !_out;
+
+#if BUZZ_DIFFERENTIAL
+  digitalWrite(_a, _out ? HIGH : LOW);
+  digitalWrite(_b, _out ? LOW  : HIGH);
+#else
+  digitalWrite(_a, _out ? HIGH : LOW);
+  digitalWrite(_b, LOW);
+#endif
+}
+
+void Buzzer::timerStop() {
+#if defined(ARDUINO_ARCH_STM32)
+  if (_tmr) _tmr->pause();
+#endif
+}
+
+void Buzzer::timerSetFreq(uint16_t freq) {
+#if defined(ARDUINO_ARCH_STM32)
+  if (!_tmr) return;
+  if (freq == 0) { timerStop(); return; }
+
+  // ISR musí běžet na 2*freq (přepíná se každou půlperiodu)
+  _tmr->setOverflow((uint32_t)freq * 2UL, HERTZ_FORMAT);
+  _tmr->resume();
+#endif
+}
+
+// ---------------- Soft fallback (non-STM32) ----------------
+
+void Buzzer::softService() {
+  if (_freq == 0) return;
+
+  const uint32_t nowUs = micros();
+  if ((int32_t)(nowUs - _softNextUs) < 0) return;
+
+  _out = !_out;
+
+#if BUZZ_DIFFERENTIAL
+  digitalWrite(_a, _out ? HIGH : LOW);
+  digitalWrite(_b, _out ? LOW  : HIGH);
+#else
+  digitalWrite(_a, _out ? HIGH : LOW);
+  digitalWrite(_b, LOW);
+#endif
+
+  const uint32_t halfPeriodUs = 1000000UL / ((uint32_t)_freq * 2UL);
+  _softNextUs = nowUs + halfPeriodUs;
 }

@@ -2,68 +2,67 @@
 #include <Arduino.h>
 #include "config.h"
 
+// Pasivní piezo potřebuje stabilní periodu.
+// Na STM32 (BluePill) to řešíme HW timerem (ISR), aby OLED/loop nezanesly jitter.
+
 class Buzzer {
 public:
-  enum Mode : uint8_t {
-    MODE_SILENT = 0,
-    MODE_RUN    = 1,
-    MODE_DIAG   = 2
-  };
+  enum Mode : uint8_t { MODE_SILENT = 0, MODE_RUN = 1, MODE_DIAG = 2 };
 
   void begin(uint8_t pinA, uint8_t pinB);
-
-  // Called often from loop()
-  void update();
 
   void setMode(Mode m);
   void stopAll();
 
-  // RUN: set desired global alarm level (0=off, 1=L1, 2=L2, 3=L3)
-  void setRunLevel(uint8_t level);
+  void setRunLevel(uint8_t level);      // 0..3
+  void triggerNewEvent();               // krátký chirp
+  void setDiagQualityPct(uint8_t pct);  // 0..100
 
-  // RUN: trigger NEW sound (ignored if current effective level is L3)
-  void triggerNewEvent();
-
-  // DIAG: quality 0..100 (affects beep speed / continuous)
-  void setDiagQualityPct(uint8_t pct);
+  void update(); // volej často z loop()
 
 private:
-  // pins
-  uint8_t _a = 0;
-  uint8_t _b = 0;
+  uint8_t _a = 0xFF;
+  uint8_t _b = 0xFF;
 
-  // mode/state
   Mode _mode = MODE_SILENT;
 
-  // RUN state
-  uint8_t _runLevel = 0;
-  uint8_t _effLevel = 0;
-
-  bool _newPending = false;
+  // RUN
+  uint8_t  _runLevel = 0;
+  uint32_t _runNextMs = 0;
+  bool     _runOn = false;
+  bool     _runAlt = false;
   uint32_t _newUntilMs = 0;
 
-  // L2 pattern
-  bool _l2On = false;
-  uint32_t _l2NextMs = 0;
-
-  // L3 pattern
-  bool _l3Phase = false;
-  uint32_t _l3NextMs = 0;
-
-  // DIAG pattern
-  uint8_t _diagPct = 0;
-  bool _diagOn = false;
+  // DIAG
+  uint8_t  _diagPct = 0;
+  bool     _diagOn = false;
   uint32_t _diagNextMs = 0;
 
-  // tone generator (differential square wave)
+  // generator
   uint16_t _freq = 0;
-  bool _out = false;
-  uint32_t _nextToggleUs = 0;
 
-  void toneDiff(uint16_t freq);
-  void noToneDiff();
-  void serviceToneGen();
+  void toneOut(uint16_t freq);
+  void noToneOut();
 
   void updateRun(uint32_t nowMs);
   void updateDiag(uint32_t nowMs);
+
+  // timer-backed generator (STM32)
+  void timerStop();
+  void timerSetFreq(uint16_t freq);
+
+  // fallback (non-STM32)
+  void softService();
+
+  static void isrThunk();
+  void isrTick();
+
+  volatile bool _out = false;
+  volatile uint32_t _softNextUs = 0;
+
+#if defined(ARDUINO_ARCH_STM32)
+  class HardwareTimer* _tmr = nullptr;
+#endif
+
+  static Buzzer* s_inst;
 };
