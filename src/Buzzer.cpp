@@ -1,34 +1,75 @@
 #include "Buzzer.h"
 
 void Buzzer::begin(uint8_t pinA, uint8_t pinB) {
-  _a = pinA; _b = pinB;
+  _a = pinA;
+  _b = pinB;
+
   pinMode(_a, OUTPUT);
   pinMode(_b, OUTPUT);
   digitalWrite(_a, LOW);
   digitalWrite(_b, LOW);
+
   _mode = MODE_SILENT;
+
+  _runLevel = 0;
+  _effLevel = 0;
+
+  _newPending = false;
+  _newUntilMs = 0;
+
+  _l2On = false;
+  _l2NextMs = 0;
+
+  _l3Phase = false;
+  _l3NextMs = 0;
+
+  _diagPct = 0;
+  _diagOn = false;
+  _diagNextMs = 0;
+
   _freq = 0;
+  _out = false;
+  _nextToggleUs = micros();
 }
 
 void Buzzer::setMode(Mode m) {
   if (_mode == m) return;
   _mode = m;
-  // reset patterns
+
+  // reset patterns to avoid “ghost beeps”
   _newPending = false;
   _newUntilMs = 0;
-  _l2On = false; _l2NextMs = 0;
-  _l3Phase = false; _l3NextMs = 0;
-  _diagOn = false; _diagNextMs = 0;
-  if (_mode == MODE_SILENT) stopAll();
+
+  _l2On = false;
+  _l2NextMs = 0;
+
+  _l3Phase = false;
+  _l3NextMs = 0;
+
+  _diagOn = false;
+  _diagNextMs = 0;
+
+  noToneDiff();
 }
 
 void Buzzer::stopAll() {
-  _runLevel = 0;
   _newPending = false;
   _newUntilMs = 0;
+
+  _runLevel = 0;
+  _effLevel = 0;
+
+  _diagPct = 0;
+  _diagOn = false;
+  _diagNextMs = 0;
+
+  _l2On = false;
+  _l2NextMs = 0;
+
+  _l3Phase = false;
+  _l3NextMs = 0;
+
   noToneDiff();
-  digitalWrite(_a, LOW);
-  digitalWrite(_b, LOW);
 }
 
 void Buzzer::setRunLevel(uint8_t level) {
@@ -37,8 +78,8 @@ void Buzzer::setRunLevel(uint8_t level) {
 }
 
 void Buzzer::triggerNewEvent() {
-  // NEW sound must NOT play if globální_level == L3 :contentReference[oaicite:18]{index=18}
-  if (_runLevel >= 3) return;
+  if (_mode != MODE_RUN) return;
+  if (_effLevel >= 3) return; // L3 has priority
   _newPending = true;
 }
 
@@ -47,13 +88,14 @@ void Buzzer::setDiagQualityPct(uint8_t pct) {
   _diagPct = pct;
 }
 
+// ---------------- differential square wave ----------------
+
 void Buzzer::toneDiff(uint16_t freq) {
   _freq = freq;
   if (_freq == 0) {
     noToneDiff();
     return;
   }
-  // start toggling immediately
   _out = false;
   _nextToggleUs = micros();
 }
@@ -66,9 +108,11 @@ void Buzzer::noToneDiff() {
 
 void Buzzer::serviceToneGen() {
   if (_freq == 0) return;
+
   const uint32_t nowUs = micros();
   if ((int32_t)(nowUs - _nextToggleUs) >= 0) {
     _out = !_out;
+
     // differential drive
     digitalWrite(_a, _out ? HIGH : LOW);
     digitalWrite(_b, _out ? LOW  : HIGH);
@@ -79,6 +123,8 @@ void Buzzer::serviceToneGen() {
   }
 }
 
+// ------------------------------------------------------------
+
 void Buzzer::update() {
   const uint32_t nowMs = millis();
 
@@ -88,89 +134,93 @@ void Buzzer::update() {
   }
 
   if (_mode == MODE_RUN) updateRun(nowMs);
-  else if (_mode == MODE_DIAG) updateDiag(nowMs);
+  else updateDiag(nowMs);
 
   serviceToneGen();
 }
 
 void Buzzer::updateRun(uint32_t nowMs) {
-  // RUN sound only when ARM (main decides to be RUN+ARM) :contentReference[oaicite:19]{index=19}
-  if (_runLevel == 0) {
-    noToneDiff();
-    return;
-  }
+  _effLevel = _runLevel;
 
-  // NEW sound: short, distinct, interrupts state sound, not during L3 :contentReference[oaicite:20]{index=20}
-  if (_newPending) {
+  // NEW beep has priority unless L3
+  if (_newPending && _effLevel < 3) {
     _newPending = false;
     _newUntilMs = nowMs + 120;
     toneDiff(BUZ_FREQ_NEW);
     return;
   }
+
   if (_newUntilMs != 0) {
-    if (nowMs < _newUntilMs) return; // keep chirp
-    _newUntilMs = 0;                 // resume state sound
+    if ((int32_t)(nowMs - _newUntilMs) < 0) return; // still playing NEW
+    _newUntilMs = 0;
   }
 
-  // L3 absolute priority :contentReference[oaicite:21]{index=21}
-  if (_runLevel >= 3) {
-    if (_l3NextMs == 0 || nowMs >= _l3NextMs) {
-      _l3Phase = !_l3Phase;
-      toneDiff(_l3Phase ? BUZ_FREQ_L3_A : BUZ_FREQ_L3_B);
-      _l3NextMs = nowMs + 250;
-    }
+  if (_effLevel == 0) {
+    noToneDiff();
     return;
   }
 
-  if (_runLevel == 2) {
-    // fast beeping
-    if (_l2NextMs == 0 || nowMs >= _l2NextMs) {
+  if (_effLevel == 1) {
+    toneDiff(BUZ_FREQ_L1);
+    return;
+  }
+
+  if (_effLevel == 2) {
+    // L2: 90ms on / 90ms off
+    if (_l2NextMs == 0 || (int32_t)(nowMs - _l2NextMs) >= 0) {
       _l2On = !_l2On;
-      if (_l2On) toneDiff(BUZ_FREQ_L2);
-      else noToneDiff();
-      _l2NextMs = nowMs + (_l2On ? 120 : 80);
+      if (_l2On) {
+        toneDiff(BUZ_FREQ_L2);
+        _l2NextMs = nowMs + 90;
+      } else {
+        noToneDiff();
+        _l2NextMs = nowMs + 90;
+      }
     }
     return;
   }
 
-  // L1: continuous tone
-  toneDiff(BUZ_FREQ_L1);
+  // L3: alternating A/B
+  if (_l3NextMs == 0 || (int32_t)(nowMs - _l3NextMs) >= 0) {
+    _l3Phase = !_l3Phase;
+    toneDiff(_l3Phase ? BUZ_FREQ_L3_A : BUZ_FREQ_L3_B);
+    _l3NextMs = nowMs + 220;
+  }
 }
 
 void Buzzer::updateDiag(uint32_t nowMs) {
-  // DIAG: tone/beep based on signal quality (0..100)
-  if (_diagPct >= 100) _diagPct = 100;
+  const uint8_t pct = _diagPct;
 
-  if (_diagPct >= 0 && _diagPct >=  (uint8_t)0) {
-    if (_diagPct >= 0) { /* no-op */ }
+  if (pct < 10) {
+    noToneDiff();
+    _diagOn = false;
+    _diagNextMs = 0;
+    return;
   }
 
-  if (_diagPct >= 0 && _diagPct >= 255) { /* impossible */ }
-
-  if (_diagPct >= 0 && _diagPct >= 100) { /* handled below */ }
-
-  if (_diagPct >= 0) {
-    // full tone at configured threshold
-    if (_diagPct >= 85) { // default threshold; main can map to cfg if desired
-      toneDiff(880);
-      return;
-    }
+  if (pct >= 85) {
+    // continuous (reuse L2 freq; config.h has no dedicated DIAG freq)
+    toneDiff(BUZ_FREQ_L2);
+    _diagOn = true;
+    return;
   }
 
-  // Map 0..84 -> period between min..max
-  // Using config defaults here; can be refined by main passing mapping.
-  const uint16_t minP = 800;
-  const uint16_t maxP = 120;
+  // 10..84%: beep speed increases with pct
+  const uint16_t minPeriod = 800;
+  const uint16_t maxPeriod = 120;
+  const uint8_t spanPct = 74; // 84-10
 
-  uint8_t pct = _diagPct;
-  if (pct > 84) pct = 84;
-  // inverse mapping: low pct -> slow
-  const uint16_t period = (uint16_t)(minP - (uint32_t)(minP - maxP) * (uint32_t)pct / 84u);
+  const uint16_t period =
+      (uint16_t)(minPeriod - (uint32_t)(minPeriod - maxPeriod) * (uint32_t)(pct - 10) / spanPct);
 
-  if (_diagNextMs == 0 || nowMs >= _diagNextMs) {
+  if (_diagNextMs == 0 || (int32_t)(nowMs - _diagNextMs) >= 0) {
     _diagOn = !_diagOn;
-    if (_diagOn) toneDiff(660);
-    else noToneDiff();
-    _diagNextMs = nowMs + (_diagOn ? period/3 : (period*2)/3);
+    if (_diagOn) {
+      toneDiff(BUZ_FREQ_L2);
+      _diagNextMs = nowMs + (period / 3);
+    } else {
+      noToneDiff();
+      _diagNextMs = nowMs + ((period * 2) / 3);
+    }
   }
 }

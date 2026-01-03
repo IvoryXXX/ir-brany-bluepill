@@ -23,39 +23,46 @@ bool Gate::isCalibrated() const {
 }
 
 uint16_t Gate::spanRaw() const {
-  return (uint16_t)((_maxRaw >= _zeroRaw) ? (_maxRaw - _zeroRaw) : 0);
+  const uint16_t lo = (_zeroRaw < _maxRaw) ? _zeroRaw : _maxRaw;
+  const uint16_t hi = (_zeroRaw < _maxRaw) ? _maxRaw : _zeroRaw;
+  return (uint16_t)(hi - lo);
 }
 
 uint16_t Gate::applyFilter(uint16_t raw, uint32_t nowMs) {
   if (_cfg->filter_type == AppConfig::NONE) return raw;
 
-  // EMA sampled at filter_samplePeriodMs
-  if ((nowMs - _lastSampleMs) < _cfg->filter_samplePeriodMs) return _lastRaw;
+  // sample period gate
+  if (_lastSampleMs != 0 && (nowMs - _lastSampleMs) < _cfg->filter_samplePeriodMs) {
+    return _lastRaw;
+  }
   _lastSampleMs = nowMs;
 
   if (!_emaInit) {
     _ema = (float)raw;
     _emaInit = true;
   } else {
-    const float a = _cfg->filter_emaAlpha;
-    _ema = a * (float)raw + (1.0f - a) * _ema;
+    // EMA alpha derived from sample period (simple fixed factor)
+    const float alpha = 0.25f;
+    _ema = _ema + alpha * ((float)raw - _ema);
   }
-  uint16_t out = (uint16_t)lroundf(_ema);
-  return out;
+  const uint16_t f = (uint16_t)lroundf(_ema);
+  return f;
 }
 
 uint16_t Gate::readRaw(uint32_t nowMs) {
-  uint16_t r = (uint16_t)analogRead(_pin);
+  uint16_t r = analogRead(_pin);
   r = applyFilter(r, nowMs);
   _lastRaw = r;
   return r;
 }
 
-float Gate::level01(uint16_t diffRaw) const {
+float Gate::level01(uint16_t raw) const {
   if (!isCalibrated()) return 0.0f;
-  const float z = (float)_zeroRaw;
-  const float m = (float)_maxRaw;
-  float v = ((float)diffRaw - z) / (m - z);
+  const float lo = (float)((_zeroRaw < _maxRaw) ? _zeroRaw : _maxRaw);
+  const float hi = (float)((_zeroRaw < _maxRaw) ? _maxRaw : _zeroRaw);
+  const float denom = (hi - lo);
+  if (denom <= 0.0f) return 0.0f;
+  float v = ((float)raw - lo) / denom;
   if (v < 0.0f) v = 0.0f;
   if (v > 1.0f) v = 1.0f;
   return v;
@@ -70,11 +77,14 @@ uint8_t Gate::levelPct(uint16_t diffRaw) const {
 }
 
 void Gate::computeThresholds(uint16_t& onThr, uint16_t& offThr) const {
-  // THRESH_ON_raw  = ZERO_raw + (BREAK_ON_PCT / 100) * SPAN_raw
-  // THRESH_OFF_raw = ZERO_raw + ((BREAK_ON_PCT + BREAK_HYST_PCT)/100) * SPAN_raw
+  // We tolerate swapped ZERO/MAX in EEPROM:
+  // Use low-end as baseline and treat "broken" as low-level condition.
+  const uint16_t lo = (_zeroRaw < _maxRaw) ? _zeroRaw : _maxRaw;
   const uint16_t span = spanRaw();
-  const uint32_t on  = (uint32_t)_zeroRaw + (uint32_t)span * (uint32_t)_cfg->break_onPct / 100u;
-  const uint32_t off = (uint32_t)_zeroRaw + (uint32_t)span * (uint32_t)(_cfg->break_onPct + _cfg->break_hystPct) / 100u;
+
+  const uint32_t on  = (uint32_t)lo + (uint32_t)span * (uint32_t)_cfg->break_onPct / 100u;
+  const uint32_t off = (uint32_t)lo + (uint32_t)span * (uint32_t)(_cfg->break_onPct + _cfg->break_hystPct) / 100u;
+
   onThr  = (uint16_t)on;
   offThr = (uint16_t)off;
 }
@@ -84,7 +94,6 @@ void Gate::runUpdate(uint32_t nowMs) {
 
   const uint16_t raw = readRaw(nowMs);
   if (!isCalibrated()) {
-    // UNCALIBRATED in RUN does not exist (ignored) :contentReference[oaicite:15]{index=15}
     _broken = false;
     _brokenSinceMs = 0;
     return;
@@ -96,7 +105,7 @@ void Gate::runUpdate(uint32_t nowMs) {
   if (!_broken) {
     if (raw <= onThr) {
       _broken = true;
-      _justBroken = true;  // OK -> BROKEN event edge :contentReference[oaicite:16]{index=16}
+      _justBroken = true;  // OK -> BROKEN edge
       _brokenSinceMs = nowMs;
     }
   } else {
