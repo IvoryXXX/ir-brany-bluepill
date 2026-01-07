@@ -63,6 +63,7 @@ static uint8_t  clickCount = 0;
 
 static void resetTimeEventsAll() {
   for (uint8_t i = 0; i < GATE_COUNT; i++) {
+    if (!gateEnabled(i)) continue;
     st.events[i] = 0;
     st.timeMs[i] = 0;
   }
@@ -105,6 +106,7 @@ static void runModeUpdate(uint32_t nowMs) {
 
     uint32_t sumE = 0, sumT = 0;
     for (uint8_t i = 0; i < GATE_COUNT; i++) {
+      if (!gateEnabled(i)) continue;
       sumE += st.events[i];
       sumT += st.timeMs[i];
     }
@@ -118,6 +120,7 @@ static void runModeUpdate(uint32_t nowMs) {
   uint8_t globalLevel = 0;
 
   for (uint8_t i = 0; i < GATE_COUNT; i++) {
+    if (!gateEnabled(i)) continue;
     if (!gates[i].isCalibrated()) continue;
 
     gates[i].runUpdate(nowMs);
@@ -140,6 +143,7 @@ static void runModeUpdate(uint32_t nowMs) {
   lastRunMs = nowMs;
 
   for (uint8_t i = 0; i < GATE_COUNT; i++) {
+    if (!gateEnabled(i)) continue;
     if (!gates[i].isCalibrated()) continue;
     if (gates[i].isBroken()) st.timeMs[i] += dt;
   }
@@ -154,6 +158,7 @@ static void runModeUpdate(uint32_t nowMs) {
   uint32_t sumE = 0, sumT = 0;
   uint8_t active = 0;
   for (uint8_t i = 0; i < GATE_COUNT; i++) {
+    if (!gateEnabled(i)) continue;
     sumE += st.events[i];
     sumT += st.timeMs[i];
     if (gates[i].isBroken()) active++;
@@ -177,7 +182,11 @@ static void diagModeUpdate(uint32_t nowMs) {
   static bool lastT1 = false;
   const bool t1Now = t1.isOn();
   if (t1Now && !lastT1) {
-    selectedGate = (uint8_t)((selectedGate + 1) % GATE_COUNT);
+    // advance to next enabled gate (wrap). If only one gate enabled, it stays.
+    for (uint8_t k = 0; k < GATE_COUNT; k++) {
+      uint8_t cand = (uint8_t)((selectedGate + 1 + k) % GATE_COUNT);
+      if (gateEnabled(cand)) { selectedGate = cand; break; }
+    }
   }
   lastT1 = t1Now;
 

@@ -2,9 +2,6 @@
 #include <Arduino.h>
 #include "config.h"
 
-// Pasivní piezo potřebuje stabilní periodu.
-// Na STM32 (BluePill) to řešíme HW timerem (ISR), aby OLED/loop nezanesly jitter.
-
 class Buzzer {
 public:
   enum Mode : uint8_t { MODE_SILENT = 0, MODE_RUN = 1, MODE_DIAG = 2 };
@@ -12,57 +9,31 @@ public:
   void begin(uint8_t pinA, uint8_t pinB);
 
   void setMode(Mode m);
+  void setRunLevel(uint8_t lvl);      // 0..3
+  void triggerNewEvent();             // audible tick for each new event
+  void setDiagQualityPct(uint8_t pct);
+
   void stopAll();
-
-  void setRunLevel(uint8_t level);      // 0..3
-  void triggerNewEvent();               // krátký chirp
-  void setDiagQualityPct(uint8_t pct);  // 0..100
-
-  void update(); // volej často z loop()
+  void update();
 
 private:
-  uint8_t _a = 0xFF;
-  uint8_t _b = 0xFF;
-
+  uint8_t _pinA = 255;
+  uint8_t _pinB = 255;
   Mode _mode = MODE_SILENT;
 
   // RUN
-  uint8_t  _runLevel = 0;
-  uint32_t _runNextMs = 0;
-  bool     _runOn = false;
-  bool     _runAlt = false;
-  uint32_t _newUntilMs = 0;
+  uint8_t _runLevel = 0;
+  bool _newEventPulse = false;
+  uint32_t _newEventUntilMs = 0;
 
   // DIAG
-  uint8_t  _diagPct = 0;
-  bool     _diagOn = false;
-  uint32_t _diagNextMs = 0;
+  uint8_t _diagQ = 0;
+  uint32_t _diagNextToggleMs = 0;
+  bool _diagBeepOn = false;
 
-  // generator
-  uint16_t _freq = 0;
+  void hwTone(uint16_t freq);
+  void hwNoTone();
 
-  void toneOut(uint16_t freq);
-  void noToneOut();
-
-  void updateRun(uint32_t nowMs);
-  void updateDiag(uint32_t nowMs);
-
-  // timer-backed generator (STM32)
-  void timerStop();
-  void timerSetFreq(uint16_t freq);
-
-  // fallback (non-STM32)
-  void softService();
-
-  static void isrThunk();
-  void isrTick();
-
-  volatile bool _out = false;
-  volatile uint32_t _softNextUs = 0;
-
-#if defined(ARDUINO_ARCH_STM32)
-  class HardwareTimer* _tmr = nullptr;
-#endif
-
-  static Buzzer* s_inst;
+  void runUpdate(uint32_t nowMs);
+  void diagUpdate(uint32_t nowMs);
 };
