@@ -31,7 +31,7 @@ struct DebouncedPin {
     }
   }
 
-  bool isOn() const { return stable == LOW; } // ON = pressed (to GND)
+  bool isOn() const { return stable == LOW; } // pressed
 };
 
 // ---------------------- Globals ----------------------
@@ -50,14 +50,14 @@ static Mode mode = MODE_RUN;
 
 // DIAG state
 static uint8_t selectedGate = 0;
-static bool diagSaveZeroPhase = true; // ZERO -> MAX -> ZERO...
+static bool diagSaveZeroPhase = true;
 static uint32_t t2PressMs = 0;
 static uint8_t lastBarPct = 0;
 
 // RUN state
 static uint32_t failsafeUntilMs = 0;
 
-// T2 click window for RESET (RUN only)
+// RESET clicks window (RUN only)
 static uint32_t clickWindowStartMs = 0;
 static uint8_t  clickCount = 0;
 
@@ -82,7 +82,7 @@ static void enterDiag(uint32_t nowMs) {
 static void exitDiagToRun(uint32_t nowMs) {
   mode = MODE_RUN;
   failsafeUntilMs = nowMs + FAILSAFE_AFTER_DIAG_MS;
-  buzzer.setMode(Buzzer::MODE_SILENT);  // failsafe wants silence
+  buzzer.setMode(Buzzer::MODE_SILENT);
   buzzer.stopAll();
   storage.save(st);
 }
@@ -96,7 +96,7 @@ static bool isArmed() {
 }
 
 // ---------------------- RUN update ----------------------
-static void runModeUpdate(uint32_t nowMs) {
+static void runModeUpdate(uint32_t nowMs, uint8_t holdPct, const char* holdText) {
   const bool failsafe = isFailsafe(nowMs);
   const bool armed = (!failsafe) && isArmed();
 
@@ -110,7 +110,7 @@ static void runModeUpdate(uint32_t nowMs) {
       sumE += st.events[i];
       sumT += st.timeMs[i];
     }
-    ui.showRun(false, failsafe, failsafe ? "FAILSAFE" : "DISARM", sumE, sumT);
+    ui.showRun(false, failsafe, failsafe ? "FAILSAFE" : "DISARM", sumE, sumT, holdPct, holdText);
     return;
   }
 
@@ -136,7 +136,6 @@ static void runModeUpdate(uint32_t nowMs) {
     else if (gates[i].isBroken()) globalLevel = max<uint8_t>(globalLevel, 1);
   }
 
-  // TIME integration
   static uint32_t lastRunMs = 0;
   if (lastRunMs == 0) lastRunMs = nowMs;
   uint32_t dt = nowMs - lastRunMs;
@@ -154,7 +153,6 @@ static void runModeUpdate(uint32_t nowMs) {
     storage.save(st);
   }
 
-  // OLED
   uint32_t sumE = 0, sumT = 0;
   uint8_t active = 0;
   for (uint8_t i = 0; i < GATE_COUNT; i++) {
@@ -171,18 +169,16 @@ static void runModeUpdate(uint32_t nowMs) {
     activeText = activeBuf;
   }
 
-  ui.showRun(true, false, activeText, sumE, sumT);
+  ui.showRun(true, false, activeText, sumE, sumT, holdPct, holdText);
 }
 
 // ---------------------- DIAG update ----------------------
 static void diagModeUpdate(uint32_t nowMs) {
   buzzer.setMode(Buzzer::MODE_DIAG);
 
-  // gate selection by T1 rising edge
   static bool lastT1 = false;
   const bool t1Now = t1.isOn();
   if (t1Now && !lastT1) {
-    // advance to next enabled gate (wrap). If only one gate enabled, it stays.
     for (uint8_t k = 0; k < GATE_COUNT; k++) {
       uint8_t cand = (uint8_t)((selectedGate + 1 + k) % GATE_COUNT);
       if (gateEnabled(cand)) { selectedGate = cand; break; }
@@ -239,7 +235,6 @@ static void diagModeUpdate(uint32_t nowMs) {
               cal.zeroRaw, cal.maxRaw, barPct, phase);
 }
 
-// ---------------------- Arduino entry points ----------------------
 void setup() {
   delay(50);
   storage.begin();
@@ -251,7 +246,6 @@ void setup() {
   StoredState loaded{};
   if (storage.load(loaded)) st = loaded;
 
-  // SANITY clamps: prevents instant DIAG if EEPROM garbage says holdMs=0
   if (st.cfg.run_enterDiag_holdMs < 300) st.cfg.run_enterDiag_holdMs = 1500;
   if (st.cfg.run_enterDiag_holdMs > 10000) st.cfg.run_enterDiag_holdMs = 10000;
   if (st.cfg.run_reset_clicks < 3) st.cfg.run_reset_clicks = 10;
@@ -279,23 +273,39 @@ void loop() {
   t1.update(nowMs);
   t2.update(nowMs);
 
-  // T2 gestures only in RUN
+  // --- RUN: compute hold UI + handle gestures ---
+  uint8_t holdPct = 0;
+  const char* holdText = nullptr;
+
   if (mode == MODE_RUN) {
     const bool t2Pressed = t2.isOn();
+
     if (t2Pressed && t2PressMs == 0) t2PressMs = nowMs;
 
+    if (t2Pressed && t2PressMs != 0) {
+      const uint32_t held = nowMs - t2PressMs;
+      const uint32_t enterDiagHoldMs = (st.cfg.run_enterDiag_holdMs < 300) ? 1500 : st.cfg.run_enterDiag_holdMs;
+
+      uint32_t pct = (held * 100u) / enterDiagHoldMs;
+      if (pct > 100) pct = 100;
+      holdPct = (uint8_t)pct;
+
+      holdText = (holdPct >= 100) ? "PUSŤ = DIAG" : "PUSŤ = KLIK (RESET)";
+    }
+
+    // release handling
     if (!t2Pressed && t2PressMs != 0) {
       const uint32_t held = nowMs - t2PressMs;
       t2PressMs = 0;
 
-      // Long hold -> enter DIAG
       const uint32_t enterDiagHoldMs = (st.cfg.run_enterDiag_holdMs < 300) ? 1500 : st.cfg.run_enterDiag_holdMs;
+
       if (held >= enterDiagHoldMs) {
         enterDiag(nowMs);
         return;
       }
 
-      // Short click -> count for RESET window
+      // short click -> count for RESET window
       if (clickWindowStartMs == 0 || (nowMs - clickWindowStartMs) > st.cfg.run_reset_windowMs) {
         clickWindowStartMs = nowMs;
         clickCount = 0;
@@ -309,7 +319,7 @@ void loop() {
     }
   }
 
-  if (mode == MODE_RUN) runModeUpdate(nowMs);
+  if (mode == MODE_RUN) runModeUpdate(nowMs, holdPct, holdText);
   else diagModeUpdate(nowMs);
 
   buzzer.update();
