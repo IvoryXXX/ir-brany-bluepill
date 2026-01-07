@@ -24,22 +24,6 @@
 static constexpr uint8_t GATE_COUNT = 8;
 static constexpr uint8_t GATE_ADC_PINS[GATE_COUNT] = {PA0, PA1, PA2, PA3, PA4, PA5, PA6, PA7};
 
-// ---------------------- Gate enable (HARD enable mask) ----------------------
-// Bit i = 1 => Gate (i+1) is active.
-// Default: ONLY G1 enabled (0b00000001).
-//
-// Examples:
-// 0x01 = G1
-// 0x03 = G1+G2
-// 0x07 = G1+G2+G3
-// 0x0F = G1..G4
-// 0xFF = G1..G8
-static constexpr uint8_t GATE_ENABLED_MASK = 0x01;
-
-static inline bool gateEnabled(uint8_t gateIndex0) {
-  return (GATE_ENABLED_MASK & (1u << gateIndex0)) != 0;
-}
-
 // 1 = invert ADC meaning (pokud máš chování brány přesně obráceně)
 //     typicky: při svícení raw klesá a kód to bere jako BROKEN -> invert to.
 #define GATE_RAW_INVERT 1

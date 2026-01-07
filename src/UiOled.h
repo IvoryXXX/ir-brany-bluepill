@@ -4,15 +4,19 @@
 
 class UiOled {
 public:
-  void begin();
+  bool begin();
+  void clear();
+  void showBoot();
 
-  // holdPct: 0..100 (progress to DIAG)
-  // holdText: short label rendered inside/near the bar (e.g. "PUSŤ=DIAG")
+  // RUN: minimalist layout with icons + bar.
   void showRun(bool armed, bool failsafe, const char* activeText,
-               uint32_t sumEvents, uint32_t sumTimeMs,
-               uint8_t holdPct = 0, const char* holdText = nullptr);
+               uint32_t totalEvents, uint32_t totalTimeMs,
+               uint8_t holdPct, const char* holdText);
 
   void showDiag(uint8_t gateIndex, uint16_t raw, bool calOk,
                 uint16_t zeroRaw, uint16_t maxRaw,
                 uint8_t barPct, const char* phaseText);
+
+private:
+  bool _ok = false;
 };
