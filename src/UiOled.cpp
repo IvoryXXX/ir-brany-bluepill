@@ -34,8 +34,7 @@ static void formatTime(char* out, size_t outSz, uint32_t ms) {
   uint32_t h = m / 60u;
   s %= 60u;
   m %= 60u;
-  snprintf(out, outSz, "%02lu:%02lu:%02lu",
-           (unsigned long)h, (unsigned long)m, (unsigned long)s);
+  snprintf(out, outSz, "%02lu:%02lu:%02lu", (unsigned long)h, (unsigned long)m, (unsigned long)s);
 }
 
 bool UiOled::begin() {
@@ -137,36 +136,55 @@ void UiOled::showRun(bool armed, bool failsafe, const char* activeText,
   display.display();
 }
 
+
+
 void UiOled::showDiag(uint8_t gateIndex, uint16_t raw, bool calOk,
                       uint16_t zeroRaw, uint16_t maxRaw,
                       uint8_t barPct, const char* phaseText) {
+  (void)calOk; // minimal DIAG: CAL not displayed
   if (!_ok) return;
 
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
+  // Row 1: left = gate, right = RAW
   display.setCursor(0, 0);
-  display.print("DIAG G");
+  display.print("G");
   display.print((unsigned)gateIndex + 1);
 
-  display.setCursor(0, 12);
-  display.print("RAW:");
-  display.print((unsigned)raw);
+  char rawBuf[20];
+  snprintf(rawBuf, sizeof(rawBuf), "RAW:%u", (unsigned)raw);
+  int16_t xRaw = 128 - (int16_t)strlen(rawBuf) * 6;
+  if (xRaw < 0) xRaw = 0;
+  display.setCursor(xRaw, 0);
+  display.print(rawBuf);
 
-  display.setCursor(0, 24);
+  // Row 2: zero + max
+  display.setCursor(0, 16);
   display.print("Z:");
   display.print((unsigned)zeroRaw);
   display.print(" M:");
   display.print((unsigned)maxRaw);
 
-  display.setCursor(0, 36);
-  display.print(calOk ? "CAL:OK " : "CAL:-- ");
-  if (phaseText) display.print(phaseText);
+  // Row 3: action text (changes depending on what you are saving)
+  if (phaseText && phaseText[0]) {
+    display.setCursor(0, 48);
+    display.print(phaseText);
+  }
 
-  uint8_t w = (barPct > 100) ? 100 : barPct;
-  display.drawRect(0, 62, 128, 2, SSD1306_WHITE);
-  display.fillRect(0, 62, (uint8_t)(128u * w / 100u), 2, SSD1306_WHITE);
+  // Row 4: bar (outline always), filled by barPct
+  const int bx = 0, by = 56, bw = 128, bh = 8;
+  display.drawRect(bx, by, bw, bh, SSD1306_WHITE);
+
+  uint8_t pct = barPct;
+  if (pct > 100) pct = 100;
+  if (pct > 0) {
+    int fillW = (int)((bw - 2) * (uint16_t)pct / 100u);
+    if (fillW < 0) fillW = 0;
+    if (fillW > (bw - 2)) fillW = (bw - 2);
+    display.fillRect(bx + 1, by + 1, fillW, bh - 2, SSD1306_WHITE);
+  }
 
   display.display();
 }
