@@ -155,22 +155,28 @@ void Buzzer::updateRun(uint32_t nowMs) {
 // ---------------- DIAG pattern ----------------
 
 void Buzzer::updateDiag(uint32_t nowMs) {
+  // Requested behavior:
+  // - full signal => silence
+  // - no signal  => fast beeping (~140 ms period)
+  // - as signal gets better, beeps become slower (up to ~900 ms)
   const uint8_t fullAtPct = 85;
-  const uint16_t slowMs = 900;
-  const uint16_t fastMs = 140;
+  const uint16_t fastNoSignalMs = 140;
+  const uint16_t slowNearFullMs = 900;
 
   if (_diagPct >= fullAtPct) {
-    toneOut(BUZ_FREQ_L2);
+    noToneOut();
     _diagNextMs = 0;
-    _diagOn = true;
+    _diagOn = false;
     return;
   }
 
   uint8_t p = _diagPct;
-  if (p < 5) p = 5;
+  if (p > fullAtPct) p = fullAtPct;
 
-  const uint32_t period = slowMs - (uint32_t)(slowMs - fastMs) * (uint32_t)p / 85U;
-  const uint32_t per = clampU32(period, fastMs, slowMs);
+  // Higher quality -> slower beeping (longer period).
+  const uint32_t period = fastNoSignalMs +
+      (uint32_t)(slowNearFullMs - fastNoSignalMs) * (uint32_t)p / (uint32_t)fullAtPct;
+  const uint32_t per = clampU32(period, fastNoSignalMs, slowNearFullMs);
 
   if (_diagNextMs == 0 || (int32_t)(nowMs - _diagNextMs) >= 0) {
     _diagOn = !_diagOn;

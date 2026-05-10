@@ -13,9 +13,12 @@ struct StoredState {
 
   GateCal cal[GATE_COUNT];
 
-  // counters (persist across power loss per tvoje zadání)
-  uint32_t events[GATE_COUNT];
+  // RUN: přerušení brány (P) / alarm ze slabosti (A)
+  uint32_t events2s[GATE_COUNT];
+  uint32_t events3s[GATE_COUNT];
   uint32_t timeMs[GATE_COUNT];
+
+  GateRunProfile gateRun[GATE_COUNT];
 };
 
 class Storage {
